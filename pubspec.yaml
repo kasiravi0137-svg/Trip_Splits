@@ -1,0 +1,25 @@
+name: trip_split
+description: Split trip expenses between member groups.
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  shared_preferences: ^2.2.0
+
+dev_dependencies:
+  flutter_launcher_icons: ^0.13.1
+
+flutter_launcher_icons:
+  android: true
+  ios: false
+  image_path: "assets/icon.png"
+  adaptive_icon_background: "#2F6FED"
+  adaptive_icon_foreground: "assets/icon_fg.png"
+
+flutter:
+  uses-material-design: true
