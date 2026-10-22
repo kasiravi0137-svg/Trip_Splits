@@ -21,6 +21,37 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Create app icons
+        run: |
+          python3 -m pip install pillow
+          mkdir -p assets
+          python3 - <<'PY'
+          from PIL import Image, ImageDraw, ImageChops
+          S = 1024
+          def art(img, k):
+              c = S // 2
+              r = int(S * 0.28 * k)
+              off = int(S * 0.12 * k)
+              def circ(dx, col):
+                  l = Image.new('RGBA', (S, S), (0, 0, 0, 0))
+                  ImageDraw.Draw(l).ellipse((c+dx-r, c-r, c+dx+r, c+r), fill=col)
+                  return l
+              img.alpha_composite(circ(-off, (124, 77, 255, 255)))
+              img.alpha_composite(circ(off, (0, 169, 143, 255)))
+              m1 = Image.new('L', (S, S), 0)
+              ImageDraw.Draw(m1).ellipse((c-off-r, c-r, c-off+r, c+r), fill=255)
+              m2 = Image.new('L', (S, S), 0)
+              ImageDraw.Draw(m2).ellipse((c+off-r, c-r, c+off+r, c+r), fill=255)
+              lens = ImageChops.multiply(m1, m2)
+              img.paste(Image.new('RGBA', (S, S), (255, 138, 61, 255)), (0, 0), lens)
+          full = Image.new('RGBA', (S, S), (47, 111, 237, 255))
+          art(full, 1.0)
+          full.convert('RGB').save('assets/icon.png')
+          fg = Image.new('RGBA', (S, S), (0, 0, 0, 0))
+          art(fg, 0.8)
+          fg.save('assets/icon_fg.png')
+          PY
+
       - name: Generate Android project
         run: |
           mkdir -p /tmp/keep
