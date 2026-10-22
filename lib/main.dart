@@ -1,8 +1,10 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_contacts/flutter_contacts.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:path_provider/path_provider.dart';
 
 void main() => runApp(const TripSplitApp());
 
@@ -92,32 +94,61 @@ class Store extends ChangeNotifier {
   List<Expense> expenses = [];
   bool loaded = false;
 
+  Future<File> _file() async {
+    final dir = await getApplicationDocumentsDirectory();
+    return File('${dir.path}/trip_data.json');
+  }
+
   Future<void> load() async {
     try {
-      final p = await SharedPreferences.getInstance()
-          .timeout(const Duration(seconds: 3));
-      final raw = p.getString('data');
-      if (raw == null) {
-        _seed();
+      final f = await _file().timeout(const Duration(seconds: 5));
+      if (await f.exists()) {
+        applyMap(jsonDecode(await f.readAsString()) as Map<String, dynamic>);
       } else {
-        final j = jsonDecode(raw) as Map<String, dynamic>;
-        tripName = j['tripName'] ?? 'Trip';
-        setupDone = j['setupDone'] ?? true;
-        groups = (j['groups'] as List)
-            .map((e) => Group.fromJson(Map<String, dynamic>.from(e)))
-            .toList();
-        members = (j['members'] as List)
-            .map((e) => Member.fromJson(Map<String, dynamic>.from(e)))
-            .toList();
-        expenses = (j['expenses'] as List)
-            .map((e) => Expense.fromJson(Map<String, dynamic>.from(e)))
-            .toList();
+        _seed();
       }
     } catch (_) {
       _seed();
     }
     loaded = true;
     notifyListeners();
+  }
+
+  Map<String, dynamic> toMap() => {
+        'tripName': tripName,
+        'setupDone': setupDone,
+        'groups': groups.map((e) => e.toJson()).toList(),
+        'members': members.map((e) => e.toJson()).toList(),
+        'expenses': expenses.map((e) => e.toJson()).toList(),
+      };
+
+  void applyMap(Map<String, dynamic> j) {
+    final g = (j['groups'] as List)
+        .map((e) => Group.fromJson(Map<String, dynamic>.from(e)))
+        .toList();
+    final m = (j['members'] as List)
+        .map((e) => Member.fromJson(Map<String, dynamic>.from(e)))
+        .toList();
+    final x = (j['expenses'] as List)
+        .map((e) => Expense.fromJson(Map<String, dynamic>.from(e)))
+        .toList();
+    tripName = j['tripName'] ?? 'Trip';
+    setupDone = j['setupDone'] ?? true;
+    groups = g.isEmpty ? [Group('g1', 'Trip members', 0)] : g;
+    members = m;
+    expenses = x;
+  }
+
+  String exportJson() => const JsonEncoder.withIndent('  ').convert(toMap());
+
+  bool importJson(String text) {
+    try {
+      applyMap(jsonDecode(text) as Map<String, dynamic>);
+      _changed();
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   void _seed() {
@@ -130,16 +161,8 @@ class Store extends ChangeNotifier {
 
   Future<void> _save() async {
     try {
-      final p = await SharedPreferences.getInstance();
-      await p.setString(
-          'data',
-          jsonEncode({
-            'tripName': tripName,
-            'setupDone': setupDone,
-            'groups': groups.map((e) => e.toJson()).toList(),
-            'members': members.map((e) => e.toJson()).toList(),
-            'expenses': expenses.map((e) => e.toJson()).toList(),
-          }));
+      final f = await _file();
+      await f.writeAsString(jsonEncode(toMap()));
     } catch (_) {}
   }
 
@@ -234,6 +257,19 @@ class Store extends ChangeNotifier {
 
   void removeExpense(String id) {
     expenses.removeWhere((e) => e.id == id);
+    _changed();
+  }
+
+  void updateExpense(String id, String title, double amount, String paidBy,
+      List<String> participants) {
+    for (final e in expenses) {
+      if (e.id == id) {
+        e.title = title;
+        e.amount = amount;
+        e.paidBy = paidBy;
+        e.participants = participants;
+      }
+    }
     _changed();
   }
 
@@ -486,25 +522,41 @@ class HomeTab extends StatelessWidget {
               const Icon(Icons.edit_outlined, size: 18, color: Colors.black45),
               PopupMenuButton<String>(
                 onSelected: (v) async {
-                  final ok = await showDialog<bool>(
-                    context: context,
-                    builder: (ctx) => AlertDialog(
-                      title: const Text('Start a new trip?'),
-                      content: const Text(
-                          'This clears all members and expenses of this trip.'),
-                      actions: [
-                        TextButton(
-                            onPressed: () => Navigator.pop(ctx, false),
-                            child: const Text('Cancel')),
-                        FilledButton(
-                            onPressed: () => Navigator.pop(ctx, true),
-                            child: const Text('Start new')),
-                      ],
-                    ),
-                  );
-                  if (ok == true) store.resetTrip();
+                  if (v == 'backup') {
+                    await Clipboard.setData(
+                        ClipboardData(text: store.exportJson()));
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                          content: Text(
+                              'Backup copied. Paste it in a note or chat to keep it.')));
+                    }
+                  } else if (v == 'restore') {
+                    restoreDialog(context);
+                  } else if (v == 'new') {
+                    final ok = await showDialog<bool>(
+                      context: context,
+                      builder: (ctx) => AlertDialog(
+                        title: const Text('Start a new trip?'),
+                        content: const Text(
+                            'This clears all members and expenses of this trip.'),
+                        actions: [
+                          TextButton(
+                              onPressed: () => Navigator.pop(ctx, false),
+                              child: const Text('Cancel')),
+                          FilledButton(
+                              onPressed: () => Navigator.pop(ctx, true),
+                              child: const Text('Start new')),
+                        ],
+                      ),
+                    );
+                    if (ok == true) store.resetTrip();
+                  }
                 },
                 itemBuilder: (_) => const [
+                  PopupMenuItem(
+                      value: 'backup', child: Text('Copy backup (JSON)')),
+                  PopupMenuItem(
+                      value: 'restore', child: Text('Restore from JSON')),
                   PopupMenuItem(value: 'new', child: Text('Start new trip')),
                 ],
               ),
@@ -677,6 +729,10 @@ class HomeTab extends StatelessWidget {
           'Paid by ${payer?.name ?? '?'} · ${e.participants.length} people'),
       trailing: Text(money(e.amount),
           style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15)),
+      onTap: () => Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => AddExpensePage(edit: e)),
+      ),
       onLongPress: () async {
         final ok = await showDialog<bool>(
           context: context,
@@ -990,7 +1046,8 @@ class BalancesTab extends StatelessWidget {
 // ----------------------------------------------------------- add expense
 
 class AddExpensePage extends StatefulWidget {
-  const AddExpensePage({super.key});
+  final Expense? edit;
+  const AddExpensePage({super.key, this.edit});
   @override
   State<AddExpensePage> createState() => _AddExpensePageState();
 }
@@ -1009,6 +1066,17 @@ class _AddExpensePageState extends State<AddExpensePage> {
     paidBy = store.members.isEmpty ? null : store.members.first.id;
     selGroups = store.groups.map((g) => g.id).toSet();
     selMembers = store.members.map((m) => m.id).toSet();
+    final e = widget.edit;
+    if (e != null) {
+      title.text = e.title;
+      amount.text = e.amount == e.amount.roundToDouble()
+          ? e.amount.toStringAsFixed(0)
+          : e.amount.toString();
+      if (store.memberById(e.paidBy) != null) paidBy = e.paidBy;
+      selMembers =
+          e.participants.where((id) => store.memberById(id) != null).toSet();
+      mode = selMembers.length == store.members.length ? 0 : 2;
+    }
   }
 
   List<String> get participants {
@@ -1045,7 +1113,12 @@ class _AddExpensePageState extends State<AddExpensePage> {
       return;
     }
     final t = title.text.trim().isEmpty ? 'Expense' : title.text.trim();
-    store.addExpense(Expense(newId(), t, amt, paidBy!, p, DateTime.now()));
+    final e = widget.edit;
+    if (e == null) {
+      store.addExpense(Expense(newId(), t, amt, paidBy!, p, DateTime.now()));
+    } else {
+      store.updateExpense(e.id, t, amt, paidBy!, p);
+    }
     Navigator.pop(context);
   }
 
@@ -1054,7 +1127,36 @@ class _AddExpensePageState extends State<AddExpensePage> {
     final p = participants;
     final per = p.isEmpty ? 0.0 : amt / p.length;
     return Scaffold(
-      appBar: AppBar(title: const Text('Add expense')),
+      appBar: AppBar(
+        title: Text(widget.edit == null ? 'Add expense' : 'Edit expense'),
+        actions: [
+          if (widget.edit != null)
+            IconButton(
+              icon: const Icon(Icons.delete_outline),
+              onPressed: () async {
+                final ok = await showDialog<bool>(
+                  context: context,
+                  builder: (ctx) => AlertDialog(
+                    title: const Text('Delete expense'),
+                    content: Text('Delete "${widget.edit!.title}"?'),
+                    actions: [
+                      TextButton(
+                          onPressed: () => Navigator.pop(ctx, false),
+                          child: const Text('Cancel')),
+                      FilledButton(
+                          onPressed: () => Navigator.pop(ctx, true),
+                          child: const Text('Delete')),
+                    ],
+                  ),
+                );
+                if (ok == true) {
+                  store.removeExpense(widget.edit!.id);
+                  if (context.mounted) Navigator.pop(context);
+                }
+              },
+            ),
+        ],
+      ),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
@@ -1155,7 +1257,7 @@ class _AddExpensePageState extends State<AddExpensePage> {
           FilledButton(
             style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(50)),
             onPressed: save,
-            child: const Text('Save expense'),
+            child: Text(widget.edit == null ? 'Save expense' : 'Save changes'),
           ),
         ],
       ),
@@ -1397,4 +1499,51 @@ class _SetupPageState extends State<SetupPage> {
       ),
     );
   }
+}
+
+// --------------------------------------------------------------- restore
+
+Future<void> restoreDialog(BuildContext context) async {
+  final c = TextEditingController();
+  String? err;
+  await showDialog(
+    context: context,
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setS) => AlertDialog(
+        title: const Text('Restore from JSON'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: c,
+              maxLines: 8,
+              decoration: const InputDecoration(
+                  hintText: 'Paste backup JSON here',
+                  border: OutlineInputBorder()),
+            ),
+            if (err != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(err!, style: const TextStyle(color: Colors.red)),
+              ),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel')),
+          FilledButton(
+            onPressed: () {
+              if (store.importJson(c.text.trim())) {
+                Navigator.pop(ctx);
+              } else {
+                setS(() => err = 'That is not a valid backup.');
+              }
+            },
+            child: const Text('Restore'),
+          ),
+        ],
+      ),
+    ),
+  );
 }
