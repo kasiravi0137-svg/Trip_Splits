@@ -61,6 +61,8 @@ jobs:
           cp -r /tmp/keep/lib .
           cp /tmp/keep/pubspec.yaml .
           sed -i 's/android:label="[^"]*"/android:label="TripSplit"/' android/app/src/main/AndroidManifest.xml
+          sed -i '/<manifest/a\    <uses-permission android:name="android.permission.READ_CONTACTS"/>' android/app/src/main/AndroidManifest.xml
+          grep -n "READ_CONTACTS" android/app/src/main/AndroidManifest.xml
 
       - run: flutter pub get
 
