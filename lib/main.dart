@@ -85,7 +85,8 @@ class Transfer {
 // ----------------------------------------------------------------- store
 
 class Store extends ChangeNotifier {
-  String tripName = 'Goa trip';
+  String tripName = '';
+  bool setupDone = false;
   List<Group> groups = [];
   List<Member> members = [];
   List<Expense> expenses = [];
@@ -101,6 +102,7 @@ class Store extends ChangeNotifier {
       } else {
         final j = jsonDecode(raw) as Map<String, dynamic>;
         tripName = j['tripName'] ?? 'Trip';
+        setupDone = j['setupDone'] ?? true;
         groups = (j['groups'] as List)
             .map((e) => Group.fromJson(Map<String, dynamic>.from(e)))
             .toList();
@@ -119,18 +121,10 @@ class Store extends ChangeNotifier {
   }
 
   void _seed() {
+    tripName = '';
+    setupDone = false;
     groups = [Group('g1', 'My side', 0), Group('g2', 'Anna side', 1)];
-    members = [
-      Member('m1', 'Me', 'g1'),
-      Member('m2', 'Friend 2', 'g1'),
-      Member('m3', 'Friend 3', 'g1'),
-      Member('m4', 'Anna', 'g2'),
-      Member('m5', 'Member 5', 'g2'),
-      Member('m6', 'Member 6', 'g2'),
-      Member('m7', 'Member 7', 'g2'),
-      Member('m8', 'Member 8', 'g2'),
-      Member('m9', 'Member 9', 'g2'),
-    ];
+    members = [];
     expenses = [];
   }
 
@@ -141,6 +135,7 @@ class Store extends ChangeNotifier {
           'data',
           jsonEncode({
             'tripName': tripName,
+            'setupDone': setupDone,
             'groups': groups.map((e) => e.toJson()).toList(),
             'members': members.map((e) => e.toJson()).toList(),
             'expenses': expenses.map((e) => e.toJson()).toList(),
@@ -171,6 +166,18 @@ class Store extends ChangeNotifier {
   // mutations
   void renameTrip(String n) {
     tripName = n;
+    _changed();
+  }
+
+  void finishSetup(String trip, String meName) {
+    tripName = trip;
+    members.insert(0, Member(newId(), meName, groups.first.id));
+    setupDone = true;
+    _changed();
+  }
+
+  void resetTrip() {
+    _seed();
     _changed();
   }
 
@@ -346,20 +353,28 @@ class _RootState extends State<Root> {
           return const Scaffold(
               body: Center(child: CircularProgressIndicator()));
         }
+        if (!store.setupDone) return const SetupPage();
         final pages = <Widget>[
-          const HomeTab(),
-          const GroupsTab(),
-          const BalancesTab(),
+          HomeTab(),
+          GroupsTab(),
+          BalancesTab(),
         ];
         return Scaffold(
           body: SafeArea(child: pages[tab]),
           floatingActionButton: FloatingActionButton(
             backgroundColor: kOrange,
             foregroundColor: Colors.white,
-            onPressed: () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => const AddExpensePage()),
-            ),
+            onPressed: () {
+              if (store.members.length < 2) {
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                    content: Text('Add members in the Groups tab first')));
+                return;
+              }
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const AddExpensePage()),
+              );
+            },
             child: const Icon(Icons.add),
           ),
           bottomNavigationBar: NavigationBar(
@@ -461,6 +476,30 @@ class HomeTab extends StatelessWidget {
                 ),
               ),
               const Icon(Icons.edit_outlined, size: 18, color: Colors.black45),
+              PopupMenuButton<String>(
+                onSelected: (v) async {
+                  final ok = await showDialog<bool>(
+                    context: context,
+                    builder: (ctx) => AlertDialog(
+                      title: const Text('Start a new trip?'),
+                      content: const Text(
+                          'This clears all members and expenses of this trip.'),
+                      actions: [
+                        TextButton(
+                            onPressed: () => Navigator.pop(ctx, false),
+                            child: const Text('Cancel')),
+                        FilledButton(
+                            onPressed: () => Navigator.pop(ctx, true),
+                            child: const Text('Start new')),
+                      ],
+                    ),
+                  );
+                  if (ok == true) store.resetTrip();
+                },
+                itemBuilder: (_) => const [
+                  PopupMenuItem(value: 'new', child: Text('Start new trip')),
+                ],
+              ),
             ],
           ),
         ),
@@ -1237,6 +1276,94 @@ class _ContactPickerPageState extends State<ContactPickerPage> {
                     ),
                   ],
                 ),
+    );
+  }
+}
+
+// ----------------------------------------------------------- first setup
+
+class SetupPage extends StatefulWidget {
+  const SetupPage({super.key});
+  @override
+  State<SetupPage> createState() => _SetupPageState();
+}
+
+class _SetupPageState extends State<SetupPage> {
+  final trip = TextEditingController();
+  final me = TextEditingController(text: 'Me');
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _askContacts());
+  }
+
+  Future<void> _askContacts() async {
+    try {
+      await FlutterContacts.requestPermission(readonly: true);
+    } catch (_) {}
+  }
+
+  void start() {
+    final t = trip.text.trim();
+    final n = me.text.trim().isEmpty ? 'Me' : me.text.trim();
+    String? err;
+    if (t.isEmpty) {
+      err = 'Enter a trip name';
+    } else if (store.members.isEmpty) {
+      err = 'Add at least one more member';
+    }
+    if (err != null) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(err)));
+      return;
+    }
+    store.finishSetup(t, n);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Set up your trip')),
+      body: ListenableBuilder(
+        listenable: store,
+        builder: (context, _) => Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+              child: Column(
+                children: [
+                  TextField(
+                    controller: trip,
+                    decoration: const InputDecoration(
+                        labelText: 'Trip name',
+                        hintText: 'Goa trip',
+                        border: OutlineInputBorder()),
+                  ),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: me,
+                    decoration: const InputDecoration(
+                        labelText: 'Your name (added to My side)',
+                        border: OutlineInputBorder()),
+                  ),
+                ],
+              ),
+            ),
+            Expanded(child: GroupsTab()),
+            SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: FilledButton(
+                  style: FilledButton.styleFrom(
+                      minimumSize: const Size.fromHeight(50)),
+                  onPressed: start,
+                  child: const Text('Start trip'),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
