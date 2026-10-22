@@ -1,0 +1,45 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Generate Android project
+        run: |
+          mkdir -p /tmp/keep
+          cp -r lib pubspec.yaml /tmp/keep/
+          flutter create --platforms=android --project-name trip_split --org com.tripsplit .
+          rm -rf lib test
+          cp -r /tmp/keep/lib .
+          cp /tmp/keep/pubspec.yaml .
+          sed -i 's/android:label="[^"]*"/android:label="TripSplit"/' android/app/src/main/AndroidManifest.xml
+
+      - run: flutter pub get
+
+      - name: Generate app icons
+        run: dart run flutter_launcher_icons
+
+      - name: Build release APK
+        run: flutter build apk --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TripSplit-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
