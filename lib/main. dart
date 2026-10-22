@@ -1,0 +1,419 @@
+import 'dart:convert';
+
+import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+void main() => runApp(const TripSplitApp());
+
+const kBlue = Color(0xFF2F6FED);
+const kOrange = Color(0xFFFF8A3D);
+const kGroupColors = <Color>[
+  Color(0xFF7C4DFF),
+  Color(0xFF00A98F),
+  Color(0xFFFF8A3D),
+  Color(0xFFE91E8C),
+  Color(0xFF2F6FED),
+];
+
+String money(double v) {
+  final r = v.roundToDouble();
+  final s = (v - r).abs() < 0.005 ? r.toStringAsFixed(0) : v.toStringAsFixed(2);
+  return '₹$s';
+}
+
+String newId() => DateTime.now().microsecondsSinceEpoch.toString();
+
+// ---------------------------------------------------------------- models
+
+class Group {
+  final String id;
+  String name;
+  int color;
+  Group(this.id, this.name, this.color);
+  Map<String, dynamic> toJson() => {'id': id, 'name': name, 'color': color};
+  factory Group.fromJson(Map<String, dynamic> j) =>
+      Group(j['id'], j['name'], j['color']);
+}
+
+class Member {
+  final String id;
+  String name;
+  String groupId;
+  Member(this.id, this.name, this.groupId);
+  Map<String, dynamic> toJson() =>
+      {'id': id, 'name': name, 'groupId': groupId};
+  factory Member.fromJson(Map<String, dynamic> j) =>
+      Member(j['id'], j['name'], j['groupId']);
+}
+
+class Expense {
+  final String id;
+  String title;
+  double amount;
+  String paidBy;
+  List<String> participants;
+  DateTime date;
+  Expense(this.id, this.title, this.amount, this.paidBy, this.participants,
+      this.date);
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'title': title,
+        'amount': amount,
+        'paidBy': paidBy,
+        'participants': participants,
+        'date': date.toIso8601String(),
+      };
+  factory Expense.fromJson(Map<String, dynamic> j) => Expense(
+        j['id'],
+        j['title'],
+        (j['amount'] as num).toDouble(),
+        j['paidBy'],
+        List<String>.from(j['participants']),
+        DateTime.parse(j['date']),
+      );
+}
+
+class Transfer {
+  final String from;
+  final String to;
+  final double amount;
+  Transfer(this.from, this.to, this.amount);
+}
+
+// ----------------------------------------------------------------- store
+
+class Store extends ChangeNotifier {
+  String tripName = 'Goa trip';
+  List<Group> groups = [];
+  List<Member> members = [];
+  List<Expense> expenses = [];
+  bool loaded = false;
+
+  Future<void> load() async {
+    final p = await SharedPreferences.getInstance();
+    final raw = p.getString('data');
+    if (raw == null) {
+      _seed();
+    } else {
+      try {
+        final j = jsonDecode(raw) as Map<String, dynamic>;
+        tripName = j['tripName'] ?? 'Trip';
+        groups = (j['groups'] as List)
+            .map((e) => Group.fromJson(Map<String, dynamic>.from(e)))
+            .toList();
+        members = (j['members'] as List)
+            .map((e) => Member.fromJson(Map<String, dynamic>.from(e)))
+            .toList();
+        expenses = (j['expenses'] as List)
+            .map((e) => Expense.fromJson(Map<String, dynamic>.from(e)))
+            .toList();
+      } catch (_) {
+        _seed();
+      }
+    }
+    loaded = true;
+    notifyListeners();
+  }
+
+  void _seed() {
+    groups = [Group('g1', 'My side', 0), Group('g2', 'Anna side', 1)];
+    members = [
+      Member('m1', 'Me', 'g1'),
+      Member('m2', 'Friend 2', 'g1'),
+      Member('m3', 'Friend 3', 'g1'),
+      Member('m4', 'Anna', 'g2'),
+      Member('m5', 'Member 5', 'g2'),
+      Member('m6', 'Member 6', 'g2'),
+      Member('m7', 'Member 7', 'g2'),
+      Member('m8', 'Member 8', 'g2'),
+      Member('m9', 'Member 9', 'g2'),
+    ];
+    expenses = [];
+  }
+
+  Future<void> _save() async {
+    final p = await SharedPreferences.getInstance();
+    await p.setString(
+        'data',
+        jsonEncode({
+          'tripName': tripName,
+          'groups': groups.map((e) => e.toJson()).toList(),
+          'members': members.map((e) => e.toJson()).toList(),
+          'expenses': expenses.map((e) => e.toJson()).toList(),
+        }));
+  }
+
+  void _changed() {
+    notifyListeners();
+    _save();
+  }
+
+  // lookups
+  Group groupOf(String id) =>
+      groups.firstWhere((g) => g.id == id, orElse: () => groups.first);
+  Member? memberById(String id) {
+    for (final m in members) {
+      if (m.id == id) return m;
+    }
+    return null;
+  }
+
+  Color colorOfGroup(String groupId) =>
+      kGroupColors[groupOf(groupId).color % kGroupColors.length];
+  List<Member> membersOf(String groupId) =>
+      members.where((m) => m.groupId == groupId).toList();
+
+  // mutations
+  void renameTrip(String n) {
+    tripName = n;
+    _changed();
+  }
+
+  void addGroup(String name) {
+    groups.add(Group(newId(), name, groups.length % kGroupColors.length));
+    _changed();
+  }
+
+  void renameGroup(String id, String name) {
+    groupOf(id).name = name;
+    _changed();
+  }
+
+  bool removeGroup(String id) {
+    if (groups.length <= 1 || membersOf(id).isNotEmpty) return false;
+    groups.removeWhere((g) => g.id == id);
+    _changed();
+    return true;
+  }
+
+  void addMember(String name, String groupId) {
+    members.add(Member(newId(), name, groupId));
+    _changed();
+  }
+
+  void updateMember(String id, String name, String groupId) {
+    final m = memberById(id);
+    if (m == null) return;
+    m.name = name;
+    m.groupId = groupId;
+    _changed();
+  }
+
+  bool removeMember(String id) {
+    final used =
+        expenses.any((e) => e.paidBy == id || e.participants.contains(id));
+    if (used || members.length <= 1) return false;
+    members.removeWhere((m) => m.id == id);
+    _changed();
+    return true;
+  }
+
+  void addExpense(Expense e) {
+    expenses.add(e);
+    _changed();
+  }
+
+  void removeExpense(String id) {
+    expenses.removeWhere((e) => e.id == id);
+    _changed();
+  }
+
+  // calculations
+  double get total => expenses.fold(0.0, (s, e) => s + e.amount);
+
+  Map<String, double> get nets {
+    final n = {for (final m in members) m.id: 0.0};
+    for (final e in expenses) {
+      if (e.participants.isEmpty) continue;
+      final share = e.amount / e.participants.length;
+      n[e.paidBy] = (n[e.paidBy] ?? 0) + e.amount;
+      for (final p in e.participants) {
+        n[p] = (n[p] ?? 0) - share;
+      }
+    }
+    return n;
+  }
+
+  Map<String, double> get shares {
+    final s = {for (final m in members) m.id: 0.0};
+    for (final e in expenses) {
+      if (e.participants.isEmpty) continue;
+      final share = e.amount / e.participants.length;
+      for (final p in e.participants) {
+        s[p] = (s[p] ?? 0) + share;
+      }
+    }
+    return s;
+  }
+
+  double groupNet(String groupId) {
+    final n = nets;
+    return membersOf(groupId).fold(0.0, (s, m) => s + (n[m.id] ?? 0));
+  }
+
+  double groupShare(String groupId) {
+    final sh = shares;
+    return membersOf(groupId).fold(0.0, (s, m) => s + (sh[m.id] ?? 0));
+  }
+
+  List<Transfer> settlements() {
+    final n = nets;
+    final debtors = <MapEntry<String, double>>[];
+    final creditors = <MapEntry<String, double>>[];
+    n.forEach((id, v) {
+      if (v < -0.005) debtors.add(MapEntry(id, -v));
+      if (v > 0.005) creditors.add(MapEntry(id, v));
+    });
+    debtors.sort((a, b) => b.value.compareTo(a.value));
+    creditors.sort((a, b) => b.value.compareTo(a.value));
+    final out = <Transfer>[];
+    var i = 0, j = 0;
+    var dv = debtors.isEmpty ? 0.0 : debtors[0].value;
+    var cv = creditors.isEmpty ? 0.0 : creditors[0].value;
+    while (i < debtors.length && j < creditors.length) {
+      final x = dv < cv ? dv : cv;
+      if (x > 0.005) out.add(Transfer(debtors[i].key, creditors[j].key, x));
+      dv -= x;
+      cv -= x;
+      if (dv < 0.005) {
+        i++;
+        if (i < debtors.length) dv = debtors[i].value;
+      }
+      if (cv < 0.005) {
+        j++;
+        if (j < creditors.length) cv = creditors[j].value;
+      }
+    }
+    return out;
+  }
+}
+
+final store = Store();
+
+// ------------------------------------------------------------------- app
+
+class TripSplitApp extends StatelessWidget {
+  const TripSplitApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'TripSplit',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        useMaterial3: true,
+        colorScheme: ColorScheme.fromSeed(seedColor: kBlue),
+        scaffoldBackgroundColor: const Color(0xFFF6F8FC),
+      ),
+      home: const Root(),
+    );
+  }
+}
+
+class Root extends StatefulWidget {
+  const Root({super.key});
+  @override
+  State<Root> createState() => _RootState();
+}
+
+class _RootState extends State<Root> {
+  int tab = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    store.load();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: store,
+      builder: (context, _) {
+        if (!store.loaded) {
+          return const Scaffold(
+              body: Center(child: CircularProgressIndicator()));
+        }
+        final pages = <Widget>[
+          const HomeTab(),
+          const GroupsTab(),
+          const BalancesTab(),
+        ];
+        return Scaffold(
+          body: SafeArea(child: pages[tab]),
+          floatingActionButton: FloatingActionButton(
+            backgroundColor: kOrange,
+            foregroundColor: Colors.white,
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const AddExpensePage()),
+            ),
+            child: const Icon(Icons.add),
+          ),
+          bottomNavigationBar: NavigationBar(
+            selectedIndex: tab,
+            onDestinationSelected: (i) => setState(() => tab = i),
+            destinations: const [
+              NavigationDestination(
+                  icon: Icon(Icons.home_outlined),
+                  selectedIcon: Icon(Icons.home),
+                  label: 'Home'),
+              NavigationDestination(
+                  icon: Icon(Icons.groups_outlined),
+                  selectedIcon: Icon(Icons.groups),
+                  label: 'Groups'),
+              NavigationDestination(
+                  icon: Icon(Icons.balance_outlined),
+                  selectedIcon: Icon(Icons.balance),
+                  label: 'Balances'),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+// ------------------------------------------------------------ shared UI
+
+class Avatar extends StatelessWidget {
+  final String name;
+  final Color color;
+  final double size;
+  const Avatar(this.name, this.color, {super.key, this.size = 36});
+
+  @override
+  Widget build(BuildContext context) {
+    final t = name.trim().isEmpty ? '?' : name.trim()[0].toUpperCase();
+    return CircleAvatar(
+      radius: size / 2,
+      backgroundColor: color,
+      child: Text(t,
+          style: TextStyle(
+              color: Colors.white,
+              fontSize: size * 0.42,
+              fontWeight: FontWeight.w600)),
+    );
+  }
+}
+
+IconData iconForTitle(String t) {
+  final s = t.toLowerCase();
+  bool has(List<String> k) => k.any(s.contains);
+  if (has(['food', 'dinner', 'lunch', 'breakfast', 'snack', 'tea', 'coffee'])) {
+    return Icons.restaurant;
+  }
+  if (has(['cab', 'taxi', 'fuel', 'petrol', 'diesel', 'bus', 'train', 'car'])) {
+    return Icons.directions_car;
+  }
+  if (has(['hotel', 'room', 'stay', 'resort'])) return Icons.hotel;
+  if (has(['ticket', 'entry', 'ride'])) return Icons.confirmation_number;
+  return Icons.receipt_long;
+}
+
+Color tintForIndex(int i) =>
+    [kOrange, kBlue, const Color(0xFF00A98F), const Color(0xFF7C4DFF)][i % 4];
+
+// ------------------------------------------------------------------ home
+
+class HomeTab ex
