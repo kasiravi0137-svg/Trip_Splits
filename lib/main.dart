@@ -123,7 +123,7 @@ class Store extends ChangeNotifier {
   void _seed() {
     tripName = '';
     setupDone = false;
-    groups = [Group('g1', 'My side', 0), Group('g2', 'Anna side', 1)];
+    groups = [Group('g1', 'Trip members', 0)];
     members = [];
     expenses = [];
   }
@@ -450,6 +450,14 @@ class HomeTab extends StatelessWidget {
   Widget build(BuildContext context) {
     final me = store.members.isNotEmpty ? store.members.first : null;
     final myNet = me == null ? 0.0 : (store.nets[me.id] ?? 0.0);
+    final owe = myNet < -0.005;
+    final mine = me == null
+        ? <Transfer>[]
+        : store
+            .settlements()
+            .where((t) => t.from == me.id || t.to == me.id)
+            .toList();
+    const red = Color(0xFFD32F2F);
     final per =
         store.members.isEmpty ? 0.0 : store.total / store.members.length;
     final w = (MediaQuery.of(context).size.width - 32 - 12) / 2;
@@ -507,24 +515,45 @@ class HomeTab extends StatelessWidget {
         Container(
           padding: const EdgeInsets.all(18),
           decoration: BoxDecoration(
-              color: kBlue, borderRadius: BorderRadius.circular(20)),
+              color: owe ? const Color(0xFFFDECEC) : kBlue,
+              borderRadius: BorderRadius.circular(20)),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(myNet >= 0 ? 'You are owed' : 'You owe',
-                  style: const TextStyle(color: Colors.white70, fontSize: 13)),
+              Text(owe ? 'You need to give' : 'You are owed',
+                  style: TextStyle(
+                      color: owe ? Colors.black54 : Colors.white70,
+                      fontSize: 13)),
               const SizedBox(height: 2),
-              Text(money(myNet.abs()),
-                  style: const TextStyle(
-                      color: Colors.white,
+              Text(
+                  owe
+                      ? '-${money(myNet.abs())}'
+                      : (myNet > 0.005
+                          ? '+${money(myNet)}'
+                          : money(0)),
+                  style: TextStyle(
+                      color: owe ? red : Colors.white,
                       fontSize: 34,
                       fontWeight: FontWeight.w600)),
+              for (final t in mine)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text(
+                    t.from == me?.id
+                        ? 'Give ${money(t.amount)} to ${store.memberById(t.to)?.name ?? '?'}'
+                        : 'Get ${money(t.amount)} from ${store.memberById(t.from)?.name ?? '?'}',
+                    style: TextStyle(
+                        color: owe ? red : Colors.white,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600),
+                  ),
+                ),
               const SizedBox(height: 12),
               Row(
                 children: [
-                  _heroChip('Total spent', money(store.total)),
+                  _heroChip('Total spent', money(store.total), owe),
                   const SizedBox(width: 10),
-                  _heroChip('Per head', money(per)),
+                  _heroChip('Per head', money(per), owe),
                 ],
               ),
             ],
@@ -555,21 +584,23 @@ class HomeTab extends StatelessWidget {
     );
   }
 
-  Widget _heroChip(String label, String value) {
+  Widget _heroChip(String label, String value, bool owe) {
     return Expanded(
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
         decoration: BoxDecoration(
-            color: Colors.white.withOpacity(0.18),
+            color: owe ? Colors.white : Colors.white.withOpacity(0.18),
             borderRadius: BorderRadius.circular(12)),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(label,
-                style: const TextStyle(color: Colors.white70, fontSize: 11)),
+                style: TextStyle(
+                    color: owe ? Colors.black54 : Colors.white70,
+                    fontSize: 11)),
             Text(value,
-                style: const TextStyle(
-                    color: Colors.white,
+                style: TextStyle(
+                    color: owe ? Colors.black87 : Colors.white,
                     fontSize: 16,
                     fontWeight: FontWeight.w600)),
           ],
@@ -1343,7 +1374,7 @@ class _SetupPageState extends State<SetupPage> {
                   TextField(
                     controller: me,
                     decoration: const InputDecoration(
-                        labelText: 'Your name (added to My side)',
+                        labelText: 'Your name',
                         border: OutlineInputBorder()),
                   ),
                 ],
