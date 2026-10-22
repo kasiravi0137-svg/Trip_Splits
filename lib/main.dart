@@ -90,12 +90,13 @@ class Store extends ChangeNotifier {
   bool loaded = false;
 
   Future<void> load() async {
-    final p = await SharedPreferences.getInstance();
-    final raw = p.getString('data');
-    if (raw == null) {
-      _seed();
-    } else {
-      try {
+    try {
+      final p = await SharedPreferences.getInstance()
+          .timeout(const Duration(seconds: 3));
+      final raw = p.getString('data');
+      if (raw == null) {
+        _seed();
+      } else {
         final j = jsonDecode(raw) as Map<String, dynamic>;
         tripName = j['tripName'] ?? 'Trip';
         groups = (j['groups'] as List)
@@ -107,9 +108,9 @@ class Store extends ChangeNotifier {
         expenses = (j['expenses'] as List)
             .map((e) => Expense.fromJson(Map<String, dynamic>.from(e)))
             .toList();
-      } catch (_) {
-        _seed();
       }
+    } catch (_) {
+      _seed();
     }
     loaded = true;
     notifyListeners();
@@ -132,15 +133,17 @@ class Store extends ChangeNotifier {
   }
 
   Future<void> _save() async {
-    final p = await SharedPreferences.getInstance();
-    await p.setString(
-        'data',
-        jsonEncode({
-          'tripName': tripName,
-          'groups': groups.map((e) => e.toJson()).toList(),
-          'members': members.map((e) => e.toJson()).toList(),
-          'expenses': expenses.map((e) => e.toJson()).toList(),
-        }));
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.setString(
+          'data',
+          jsonEncode({
+            'tripName': tripName,
+            'groups': groups.map((e) => e.toJson()).toList(),
+            'members': members.map((e) => e.toJson()).toList(),
+            'expenses': expenses.map((e) => e.toJson()).toList(),
+          }));
+    } catch (_) {}
   }
 
   void _changed() {
