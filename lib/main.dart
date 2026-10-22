@@ -43,11 +43,18 @@ class Member {
   String name;
   String groupId;
   String phone;
-  Member(this.id, this.name, this.groupId, [this.phone = '']);
-  Map<String, dynamic> toJson() =>
-      {'id': id, 'name': name, 'groupId': groupId, 'phone': phone};
-  factory Member.fromJson(Map<String, dynamic> j) =>
-      Member(j['id'], j['name'], j['groupId'], j['phone'] ?? '');
+  int people;
+  Member(this.id, this.name, this.groupId,
+      [this.phone = '', this.people = 1]);
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'groupId': groupId,
+        'phone': phone,
+        'people': people,
+      };
+  factory Member.fromJson(Map<String, dynamic> j) => Member(
+      j['id'], j['name'], j['groupId'], j['phone'] ?? '', j['people'] ?? 1);
 }
 
 class Expense {
@@ -221,8 +228,9 @@ class Store extends ChangeNotifier {
     return true;
   }
 
-  void addMember(String name, String groupId, [String phone = '']) {
-    members.add(Member(newId(), name, groupId, phone));
+  void addMember(String name, String groupId,
+      [String phone = '', int people = 1]) {
+    members.add(Member(newId(), name, groupId, phone, people));
     _changed();
   }
 
@@ -232,12 +240,13 @@ class Store extends ChangeNotifier {
   }
 
   void updateMember(String id, String name, String groupId,
-      [String phone = '']) {
+      [String phone = '', int people = 1]) {
     final m = memberById(id);
     if (m == null) return;
     m.name = name;
     m.groupId = groupId;
     m.phone = phone;
+    m.people = people;
     _changed();
   }
 
@@ -276,14 +285,19 @@ class Store extends ChangeNotifier {
   // calculations
   double get total => expenses.fold(0.0, (s, e) => s + e.amount);
 
+  int peopleOf(String id) => memberById(id)?.people ?? 1;
+
+  int totalPeople(List<String> ids) =>
+      ids.fold(0, (s, id) => s + peopleOf(id));
+
   Map<String, double> get nets {
     final n = {for (final m in members) m.id: 0.0};
     for (final e in expenses) {
       if (e.participants.isEmpty) continue;
-      final share = e.amount / e.participants.length;
+      final tw = totalPeople(e.participants);
       n[e.paidBy] = (n[e.paidBy] ?? 0) + e.amount;
       for (final p in e.participants) {
-        n[p] = (n[p] ?? 0) - share;
+        n[p] = (n[p] ?? 0) - e.amount * peopleOf(p) / tw;
       }
     }
     return n;
@@ -293,9 +307,9 @@ class Store extends ChangeNotifier {
     final s = {for (final m in members) m.id: 0.0};
     for (final e in expenses) {
       if (e.participants.isEmpty) continue;
-      final share = e.amount / e.participants.length;
+      final tw = totalPeople(e.participants);
       for (final p in e.participants) {
-        s[p] = (s[p] ?? 0) + share;
+        s[p] = (s[p] ?? 0) + e.amount * peopleOf(p) / tw;
       }
     }
     return s;
@@ -495,7 +509,10 @@ class HomeTab extends StatelessWidget {
             .toList();
     const red = Color(0xFFD32F2F);
     final per =
-        store.members.isEmpty ? 0.0 : store.total / store.members.length;
+        store.members.isEmpty
+            ? 0.0
+            : store.total /
+                store.totalPeople(store.members.map((m) => m.id).toList());
     final w = (MediaQuery.of(context).size.width - 32 - 12) / 2;
     final recent = store.expenses.reversed.toList();
 
@@ -726,7 +743,7 @@ class HomeTab extends StatelessWidget {
       ),
       title: Text(e.title, style: const TextStyle(fontWeight: FontWeight.w600)),
       subtitle: Text(
-          'Paid by ${payer?.name ?? '?'} · ${e.participants.length} people'),
+          'Paid by ${payer?.name ?? '?'} · ${store.totalPeople(e.participants)} people'),
       trailing: Text(money(e.amount),
           style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15)),
       onTap: () => Navigator.push(
@@ -888,7 +905,12 @@ class GroupsTab extends StatelessWidget {
               dense: true,
               leading: Avatar(m.name, color, size: 32),
               title: Text(m.name),
-              subtitle: m.phone.isEmpty ? null : Text(m.phone),
+              subtitle: (m.phone.isEmpty && m.people <= 1)
+                  ? null
+                  : Text([
+                      if (m.people > 1) '${m.people} people',
+                      if (m.phone.isNotEmpty) m.phone,
+                    ].join(' · ')),
               trailing: const Icon(Icons.chevron_right, size: 18),
               onTap: () => memberDialog(context, m: m),
             ),
@@ -906,6 +928,7 @@ class GroupsTab extends StatelessWidget {
 Future<void> memberDialog(BuildContext context, {Member? m}) async {
   final name = TextEditingController(text: m?.name ?? '');
   final phone = TextEditingController(text: m?.phone ?? '');
+  final people = TextEditingController(text: '${m?.people ?? 1}');
   String gid = m?.groupId ?? store.groups.first.id;
   await showDialog(
     context: context,
@@ -926,6 +949,14 @@ Future<void> memberDialog(BuildContext context, {Member? m}) async {
               keyboardType: TextInputType.phone,
               decoration:
                   const InputDecoration(labelText: 'Phone number (optional)'),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: people,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(
+                  labelText: 'People covered',
+                  helperText: '1 = only this person. Use 3 for you + 2 family'),
             ),
             const SizedBox(height: 12),
             DropdownButtonFormField<String>(
@@ -961,10 +992,12 @@ Future<void> memberDialog(BuildContext context, {Member? m}) async {
               final n = name.text.trim();
               if (n.isEmpty) return;
               final ph = phone.text.trim();
+              final pc = int.tryParse(people.text.trim()) ?? 1;
+              final cnt = pc < 1 ? 1 : pc;
               if (m == null) {
-                store.addMember(n, gid, ph);
+                store.addMember(n, gid, ph, cnt);
               } else {
-                store.updateMember(m.id, n, gid, ph);
+                store.updateMember(m.id, n, gid, ph, cnt);
               }
               Navigator.pop(ctx);
             },
@@ -1125,7 +1158,8 @@ class _AddExpensePageState extends State<AddExpensePage> {
   @override
   Widget build(BuildContext context) {
     final p = participants;
-    final per = p.isEmpty ? 0.0 : amt / p.length;
+    final totalP = store.totalPeople(p);
+    final per = totalP == 0 ? 0.0 : amt / totalP;
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.edit == null ? 'Add expense' : 'Edit expense'),
@@ -1237,19 +1271,13 @@ class _AddExpensePageState extends State<AddExpensePage> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('${p.length} people · ${money(per)} each',
+                Text('$totalP people · ${money(per)} each',
                     style: const TextStyle(
                         fontWeight: FontWeight.w600, color: kBlue)),
                 const SizedBox(height: 6),
-                for (final g in store.groups)
-                  Builder(builder: (_) {
-                    final n = store
-                        .membersOf(g.id)
-                        .where((m) => p.contains(m.id))
-                        .length;
-                    if (n == 0) return const SizedBox.shrink();
-                    return Text('${g.name}: $n × ${money(per)} = ${money(per * n)}');
-                  }),
+                for (final m in store.members.where((m) => p.contains(m.id)))
+                  Text(
+                      '${m.name}${m.people > 1 ? ' × ${m.people}' : ''}: ${money(per * m.people)}'),
               ],
             ),
           ),
