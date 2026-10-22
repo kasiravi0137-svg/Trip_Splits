@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_contacts/flutter_contacts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() => runApp(const TripSplitApp());
@@ -39,11 +40,12 @@ class Member {
   final String id;
   String name;
   String groupId;
-  Member(this.id, this.name, this.groupId);
+  String phone;
+  Member(this.id, this.name, this.groupId, [this.phone = '']);
   Map<String, dynamic> toJson() =>
-      {'id': id, 'name': name, 'groupId': groupId};
+      {'id': id, 'name': name, 'groupId': groupId, 'phone': phone};
   factory Member.fromJson(Map<String, dynamic> j) =>
-      Member(j['id'], j['name'], j['groupId']);
+      Member(j['id'], j['name'], j['groupId'], j['phone'] ?? '');
 }
 
 class Expense {
@@ -189,16 +191,23 @@ class Store extends ChangeNotifier {
     return true;
   }
 
-  void addMember(String name, String groupId) {
-    members.add(Member(newId(), name, groupId));
+  void addMember(String name, String groupId, [String phone = '']) {
+    members.add(Member(newId(), name, groupId, phone));
     _changed();
   }
 
-  void updateMember(String id, String name, String groupId) {
+  void addMembers(List<Member> list) {
+    members.addAll(list);
+    _changed();
+  }
+
+  void updateMember(String id, String name, String groupId,
+      [String phone = '']) {
     final m = memberById(id);
     if (m == null) return;
     m.name = name;
     m.groupId = groupId;
+    m.phone = phone;
     _changed();
   }
 
@@ -672,10 +681,27 @@ class GroupsTab extends StatelessWidget {
         const SizedBox(height: 8),
         for (final g in store.groups) _groupBlock(context, g),
         const SizedBox(height: 8),
-        FilledButton.icon(
-          onPressed: () => memberDialog(context),
-          icon: const Icon(Icons.person_add_alt_1),
-          label: const Text('Add member'),
+        Row(
+          children: [
+            Expanded(
+              child: FilledButton.icon(
+                onPressed: () => memberDialog(context),
+                icon: const Icon(Icons.person_add_alt_1),
+                label: const Text('Add member'),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const ContactPickerPage()),
+                ),
+                icon: const Icon(Icons.contacts_outlined),
+                label: const Text('From contacts'),
+              ),
+            ),
+          ],
         ),
         const SizedBox(height: 8),
         const Text('Tap a member to edit or move to another group.',
@@ -736,6 +762,7 @@ class GroupsTab extends StatelessWidget {
               dense: true,
               leading: Avatar(m.name, color, size: 32),
               title: Text(m.name),
+              subtitle: m.phone.isEmpty ? null : Text(m.phone),
               trailing: const Icon(Icons.chevron_right, size: 18),
               onTap: () => memberDialog(context, m: m),
             ),
@@ -752,6 +779,7 @@ class GroupsTab extends StatelessWidget {
 
 Future<void> memberDialog(BuildContext context, {Member? m}) async {
   final name = TextEditingController(text: m?.name ?? '');
+  final phone = TextEditingController(text: m?.phone ?? '');
   String gid = m?.groupId ?? store.groups.first.id;
   await showDialog(
     context: context,
@@ -765,6 +793,13 @@ Future<void> memberDialog(BuildContext context, {Member? m}) async {
               controller: name,
               autofocus: true,
               decoration: const InputDecoration(labelText: 'Name'),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: phone,
+              keyboardType: TextInputType.phone,
+              decoration:
+                  const InputDecoration(labelText: 'Phone number (optional)'),
             ),
             const SizedBox(height: 12),
             DropdownButtonFormField<String>(
@@ -799,10 +834,11 @@ Future<void> memberDialog(BuildContext context, {Member? m}) async {
             onPressed: () {
               final n = name.text.trim();
               if (n.isEmpty) return;
+              final ph = phone.text.trim();
               if (m == null) {
-                store.addMember(n, gid);
+                store.addMember(n, gid, ph);
               } else {
-                store.updateMember(m.id, n, gid);
+                store.updateMember(m.id, n, gid, ph);
               }
               Navigator.pop(ctx);
             },
@@ -1053,6 +1089,154 @@ class _AddExpensePageState extends State<AddExpensePage> {
           ),
         ],
       ),
+    );
+  }
+}
+
+// -------------------------------------------------------- contact picker
+
+String _digits(String s) => s.replaceAll(RegExp(r'[^0-9]'), '');
+
+class ContactPickerPage extends StatefulWidget {
+  const ContactPickerPage({super.key});
+  @override
+  State<ContactPickerPage> createState() => _ContactPickerPageState();
+}
+
+class _ContactPickerPageState extends State<ContactPickerPage> {
+  List<Contact> all = [];
+  final Set<String> picked = {};
+  String query = '';
+  String? error;
+  bool busy = true;
+  late String gid;
+
+  @override
+  void initState() {
+    super.initState();
+    gid = store.groups.first.id;
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final ok = await FlutterContacts.requestPermission(readonly: true);
+      if (!ok) {
+        setState(() {
+          error =
+              'Contacts permission denied. Allow it in phone Settings, Apps, TripSplit, Permissions.';
+          busy = false;
+        });
+        return;
+      }
+      final list = await FlutterContacts.getContacts(withProperties: true);
+      list.sort((a, b) =>
+          a.displayName.toLowerCase().compareTo(b.displayName.toLowerCase()));
+      setState(() {
+        all = list.where((c) => c.phones.isNotEmpty).toList();
+        busy = false;
+      });
+    } catch (_) {
+      setState(() {
+        error = 'Could not read contacts.';
+        busy = false;
+      });
+    }
+  }
+
+  void addPicked() {
+    final existing = store.members.map((m) => _digits(m.phone)).toSet();
+    final added = <Member>[];
+    var i = 0;
+    for (final c in all) {
+      if (!picked.contains(c.id)) continue;
+      final number = c.phones.first.number;
+      final d = _digits(number);
+      if (d.isNotEmpty && existing.contains(d)) continue;
+      existing.add(d);
+      added.add(Member('${newId()}_${i++}', c.displayName, gid, number));
+    }
+    store.addMembers(added);
+    Navigator.pop(context);
+    ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${added.length} members added')));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final q = query.toLowerCase();
+    final shown = all
+        .where((c) =>
+            q.isEmpty ||
+            c.displayName.toLowerCase().contains(q) ||
+            c.phones.any((p) => p.number.contains(q)))
+        .toList();
+    return Scaffold(
+      appBar: AppBar(title: const Text('Add from contacts')),
+      body: busy
+          ? const Center(child: CircularProgressIndicator())
+          : error != null
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Text(error!, textAlign: TextAlign.center),
+                  ),
+                )
+              : Column(
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+                      child: DropdownButtonFormField<String>(
+                        value: gid,
+                        decoration: const InputDecoration(
+                            labelText: 'Add to group',
+                            border: OutlineInputBorder()),
+                        items: [
+                          for (final g in store.groups)
+                            DropdownMenuItem(value: g.id, child: Text(g.name)),
+                        ],
+                        onChanged: (v) => setState(() => gid = v ?? gid),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: TextField(
+                        onChanged: (v) => setState(() => query = v),
+                        decoration: const InputDecoration(
+                            prefixIcon: Icon(Icons.search),
+                            hintText: 'Search name or number',
+                            border: OutlineInputBorder()),
+                      ),
+                    ),
+                    Expanded(
+                      child: ListView.builder(
+                        itemCount: shown.length,
+                        itemBuilder: (_, i) {
+                          final c = shown[i];
+                          return CheckboxListTile(
+                            value: picked.contains(c.id),
+                            title: Text(c.displayName),
+                            subtitle: Text(c.phones.first.number),
+                            onChanged: (v) => setState(() {
+                              v == true ? picked.add(c.id) : picked.remove(c.id);
+                            }),
+                          );
+                        },
+                      ),
+                    ),
+                    SafeArea(
+                      child: Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: FilledButton(
+                          style: FilledButton.styleFrom(
+                              minimumSize: const Size.fromHeight(50)),
+                          onPressed: picked.isEmpty ? null : addPicked,
+                          child: Text('Add ${picked.length} members'),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
     );
   }
 }
