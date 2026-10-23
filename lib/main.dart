@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_contacts/flutter_contacts.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 void main() => runApp(const TripSplitApp());
 
@@ -941,6 +942,90 @@ class _WelcomePageState extends State<WelcomePage> {
   }
 }
 
+// --------------------------------------------------------------- reminders
+
+String waNumber(String phone) {
+  var d = phone.replaceAll(RegExp(r'[^0-9]'), '');
+  if (d.length == 11 && d.startsWith('0')) d = d.substring(1);
+  if (d.length == 10) d = '91$d';
+  return d;
+}
+
+Future<void> sendReminder(BuildContext context, Group g, Transfer t) async {
+  final debtor = g.member(t.from);
+  if (debtor == null) return;
+  if (debtor.phone.trim().isEmpty) {
+    snack(context, 'Add ${debtor.name}\'s phone number in Members first');
+    return;
+  }
+  final creditor = g.nameOf(t.to) == 'You' ? store.myName : g.nameOf(t.to);
+  final msg =
+      'Hi ${debtor.name}, reminder from TripSplit: in "${g.name}" you owe ${money(t.amount)} to $creditor. Please pay when you can.';
+  final choice = await showModalBottomSheet<String>(
+    context: context,
+    builder: (ctx) => SafeArea(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text('Send reminder to ${debtor.name}',
+                  style: const TextStyle(
+                      fontSize: 16, fontWeight: FontWeight.w600)),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text(msg,
+                  style: const TextStyle(fontSize: 12, color: Colors.black54)),
+            ),
+          ),
+          ListTile(
+            leading: const Icon(Icons.chat_outlined),
+            title: const Text('WhatsApp'),
+            onTap: () => Navigator.pop(ctx, 'wa'),
+          ),
+          ListTile(
+            leading: const Icon(Icons.sms_outlined),
+            title: const Text('SMS'),
+            onTap: () => Navigator.pop(ctx, 'sms'),
+          ),
+          ListTile(
+            leading: const Icon(Icons.copy_outlined),
+            title: const Text('Copy message'),
+            onTap: () => Navigator.pop(ctx, 'copy'),
+          ),
+        ],
+      ),
+    ),
+  );
+  if (choice == null) return;
+  final text = Uri.encodeComponent(msg);
+  var ok = false;
+  try {
+    if (choice == 'wa') {
+      ok = await launchUrl(
+          Uri.parse('https://wa.me/${waNumber(debtor.phone)}?text=$text'),
+          mode: LaunchMode.externalApplication);
+    } else if (choice == 'sms') {
+      final n = debtor.phone.replaceAll(RegExp(r'[^0-9+]'), '');
+      ok = await launchUrl(Uri.parse('sms:$n?body=$text'),
+          mode: LaunchMode.externalApplication);
+    } else {
+      await Clipboard.setData(ClipboardData(text: msg));
+      ok = true;
+      if (context.mounted) snack(context, 'Message copied');
+    }
+  } catch (_) {
+    ok = false;
+  }
+  if (!ok && context.mounted) snack(context, 'Could not open the app');
+}
+
 // ----------------------------------------------------------- groups tab
 
 class GroupsTab extends StatelessWidget {
@@ -1525,26 +1610,42 @@ class BalancesView extends StatelessWidget {
             padding: const EdgeInsets.only(bottom: 8),
             child: Panel(
               child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Row(
+                padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
+                child: Column(
                   children: [
-                    Expanded(
-                      child: Text(
-                        '${g.nameOf(t.from)} ${g.nameOf(t.from) == 'You' ? 'pay' : 'pays'} ${g.nameOf(t.to)}',
-                        maxLines: 2,
-                        style: const TextStyle(fontWeight: FontWeight.w500),
-                      ),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            '${g.nameOf(t.from)} ${g.nameOf(t.from) == 'You' ? 'pay' : 'pays'} ${g.nameOf(t.to)}',
+                            maxLines: 2,
+                            style: const TextStyle(fontWeight: FontWeight.w500),
+                          ),
+                        ),
+                        Text(money(t.amount),
+                            style: const TextStyle(
+                                fontWeight: FontWeight.w600,
+                                fontSize: 16,
+                                color: kBlue)),
+                      ],
                     ),
-                    Text(money(t.amount),
-                        style: const TextStyle(
-                            fontWeight: FontWeight.w600,
-                            fontSize: 16,
-                            color: kBlue)),
-                    const SizedBox(width: 8),
-                    OutlinedButton(
-                      onPressed: () => settleDialog(context, g,
-                          from: t.from, to: t.to, amount: t.amount),
-                      child: const Text('Settle'),
+                    const SizedBox(height: 6),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        if (g.me != null && t.to == g.me!.id)
+                          TextButton.icon(
+                            onPressed: () => sendReminder(context, g, t),
+                            icon: const Icon(Icons.send, size: 16),
+                            label: const Text('Remind'),
+                          ),
+                        const SizedBox(width: 8),
+                        OutlinedButton(
+                          onPressed: () => settleDialog(context, g,
+                              from: t.from, to: t.to, amount: t.amount),
+                          child: const Text('Settle'),
+                        ),
+                      ],
                     ),
                   ],
                 ),
