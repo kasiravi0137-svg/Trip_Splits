@@ -7,6 +7,8 @@ import 'package:flutter_contacts/flutter_contacts.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+const _smsChannel = MethodChannel('tripsplit/sms');
+
 void main() => runApp(const TripSplitApp());
 
 const kBlue = Color(0xFF2F6FED);
@@ -985,13 +987,21 @@ Future<void> sendReminder(BuildContext context, Group g, Transfer t) async {
             ),
           ),
           ListTile(
+            leading: const Icon(Icons.send_to_mobile, color: kBlue),
+            title: const Text('Send SMS now'),
+            subtitle: const Text('Sent in the background, no app opens'),
+            onTap: () => Navigator.pop(ctx, 'direct'),
+          ),
+          ListTile(
             leading: const Icon(Icons.chat_outlined),
             title: const Text('WhatsApp'),
+            subtitle: const Text('Opens WhatsApp, you press send'),
             onTap: () => Navigator.pop(ctx, 'wa'),
           ),
           ListTile(
             leading: const Icon(Icons.sms_outlined),
-            title: const Text('SMS'),
+            title: const Text('SMS app'),
+            subtitle: const Text('Opens Messages, you press send'),
             onTap: () => Navigator.pop(ctx, 'sms'),
           ),
           ListTile(
@@ -1007,7 +1017,19 @@ Future<void> sendReminder(BuildContext context, Group g, Transfer t) async {
   final text = Uri.encodeComponent(msg);
   var ok = false;
   try {
-    if (choice == 'wa') {
+    if (choice == 'direct') {
+      final n = debtor.phone.replaceAll(RegExp(r'[^0-9+]'), '');
+      final sent = await _smsChannel.invokeMethod<bool>(
+          'send', {'to': n, 'msg': msg.replaceAll('₹', 'Rs.')});
+      if (context.mounted) {
+        snack(
+            context,
+            sent == true
+                ? 'SMS sent to ${debtor.name}'
+                : 'Could not send. Allow the SMS permission and try again.');
+      }
+      return;
+    } else if (choice == 'wa') {
       ok = await launchUrl(
           Uri.parse('https://wa.me/${waNumber(debtor.phone)}?text=$text'),
           mode: LaunchMode.externalApplication);
