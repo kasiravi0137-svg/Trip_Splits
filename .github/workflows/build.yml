@@ -62,7 +62,96 @@ jobs:
           cp /tmp/keep/pubspec.yaml .
           sed -i 's/android:label="[^"]*"/android:label="TripSplit"/' android/app/src/main/AndroidManifest.xml
           sed -i '/<manifest/a\    <uses-permission android:name="android.permission.READ_CONTACTS"/>' android/app/src/main/AndroidManifest.xml
-          grep -n "READ_CONTACTS" android/app/src/main/AndroidManifest.xml
+          sed -i '/<manifest/a\    <uses-permission android:name="android.permission.SEND_SMS"/>' android/app/src/main/AndroidManifest.xml
+          grep -n "READ_CONTACTS\|SEND_SMS" android/app/src/main/AndroidManifest.xml
+          MAIN=$(find android/app/src/main -name 'MainActivity.*' | head -1)
+          DIR=$(dirname "$MAIN")
+          PKG=$(grep -m1 '^package ' "$MAIN" | sed 's/package //; s/;//')
+          rm -f "$MAIN"
+          cat > "$DIR/MainActivity.kt" <<KT
+          package $PKG
+
+          import android.Manifest
+          import android.content.pm.PackageManager
+          import android.os.Build
+          import android.telephony.SmsManager
+          import io.flutter.embedding.android.FlutterActivity
+          import io.flutter.embedding.engine.FlutterEngine
+          import io.flutter.plugin.common.MethodChannel
+
+          class MainActivity : FlutterActivity() {
+              private val channelName = "tripsplit/sms"
+              private val reqCode = 4711
+              private var pendingResult: MethodChannel.Result? = null
+              private var pendingTo: String = ""
+              private var pendingMsg: String = ""
+
+              override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+                  super.configureFlutterEngine(flutterEngine)
+                  MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
+                      .setMethodCallHandler { call, result ->
+                          if (call.method == "send") {
+                              val to = call.argument<String>("to") ?: ""
+                              val msg = call.argument<String>("msg") ?: ""
+                              if (hasPerm()) {
+                                  result.success(sendSms(to, msg))
+                              } else {
+                                  pendingResult = result
+                                  pendingTo = to
+                                  pendingMsg = msg
+                                  askPerm()
+                              }
+                          } else {
+                              result.notImplemented()
+                          }
+                      }
+              }
+
+              private fun hasPerm(): Boolean {
+                  if (Build.VERSION.SDK_INT >= 23) {
+                      return checkSelfPermission(Manifest.permission.SEND_SMS) == PackageManager.PERMISSION_GRANTED
+                  }
+                  return true
+              }
+
+              private fun askPerm() {
+                  if (Build.VERSION.SDK_INT >= 23) {
+                      requestPermissions(arrayOf(Manifest.permission.SEND_SMS), reqCode)
+                  }
+              }
+
+              override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+                  super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+                  if (requestCode == reqCode) {
+                      val r = pendingResult
+                      pendingResult = null
+                      if (r != null) {
+                          if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                              r.success(sendSms(pendingTo, pendingMsg))
+                          } else {
+                              r.success(false)
+                          }
+                      }
+                  }
+              }
+
+              private fun sendSms(to: String, msg: String): Boolean {
+                  return try {
+                      val sm: SmsManager = if (Build.VERSION.SDK_INT >= 31) {
+                          getSystemService(SmsManager::class.java)
+                      } else {
+                          SmsManager.getDefault()
+                      }
+                      val parts = sm.divideMessage(msg)
+                      sm.sendMultipartTextMessage(to, null, parts, null, null)
+                      true
+                  } catch (e: Exception) {
+                      false
+                  }
+              }
+          }
+          KT
+          cat "$DIR/MainActivity.kt" | head -5
 
       - run: flutter pub get
 
