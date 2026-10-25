@@ -1510,10 +1510,26 @@ Widget paymentTile(BuildContext context, Group g, Payment p,
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
         style: const TextStyle(fontWeight: FontWeight.w600)),
-    subtitle: Text('${showGroup ? '${g.name} · ' : ''}${fmtDate(p.date)} · Payment'),
-    trailing: Text(money(p.amount),
-        style: const TextStyle(
-            fontSize: 15, fontWeight: FontWeight.w600, color: kGreen)),
+    subtitle: Text('${showGroup ? '${g.name} · ' : ''}${fmtDate(p.date)}'),
+    trailing: Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        Text(money(p.amount),
+            style: const TextStyle(
+                fontSize: 15, fontWeight: FontWeight.w600, color: kGreen)),
+        const SizedBox(height: 2),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+          decoration: BoxDecoration(
+              color: kGreen.withOpacity(0.14),
+              borderRadius: BorderRadius.circular(99)),
+          child: const Text('Settled',
+              style: TextStyle(
+                  fontSize: 11, fontWeight: FontWeight.w600, color: kGreen)),
+        ),
+      ],
+    ),
     onTap: () async {
       final ok = await confirmDialog(context, 'Delete payment',
           'Remove this payment of ${money(p.amount)}?', 'Delete');
@@ -1623,8 +1639,15 @@ class BalancesView extends StatelessWidget {
           const Panel(
             child: Padding(
               padding: EdgeInsets.all(16),
-              child: Text('Everyone is settled up.',
-                  style: TextStyle(color: Colors.black54)),
+              child: Row(
+                children: [
+                  Icon(Icons.check_circle, color: kGreen),
+                  SizedBox(width: 10),
+                  Text('Everyone is settled up',
+                      style: TextStyle(
+                          color: kGreen, fontWeight: FontWeight.w600)),
+                ],
+              ),
             ),
           ),
         for (final t in transfers)
@@ -1662,10 +1685,11 @@ class BalancesView extends StatelessWidget {
                             label: const Text('Remind'),
                           ),
                         const SizedBox(width: 8),
-                        OutlinedButton(
+                        FilledButton.icon(
                           onPressed: () => settleDialog(context, g,
                               from: t.from, to: t.to, amount: t.amount),
-                          child: const Text('Settle'),
+                          icon: const Icon(Icons.check_circle_outline, size: 18),
+                          label: const Text('Mark as settled'),
                         ),
                       ],
                     ),
@@ -1838,16 +1862,25 @@ Future<void> settleDialog(BuildContext context, Group g,
           .firstWhere((m) => m.id != f, orElse: () => g.members.first)
           .id;
   final c = TextEditingController(text: amount == null ? '' : fmtNum(amount));
+  final quick = from != null && to != null;
   String? err;
   await showDialog(
     context: context,
     builder: (ctx) => StatefulBuilder(
       builder: (ctx, setS) => AlertDialog(
-        title: const Text('Record a payment'),
+        title: Text(quick ? 'Mark as settled?' : 'Record a payment'),
         content: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
+              if (quick)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: Text(
+                      '${g.nameOf(f)} paid ${g.nameOf(t)}. This will be saved in history as Settled.',
+                      style: const TextStyle(color: Colors.black54)),
+                ),
+              if (!quick)
               DropdownButtonFormField<String>(
                 value: f,
                 isExpanded: true,
@@ -1859,7 +1892,8 @@ Future<void> settleDialog(BuildContext context, Group g,
                 ],
                 onChanged: (v) => setS(() => f = v ?? f),
               ),
-              const SizedBox(height: 12),
+              if (!quick) const SizedBox(height: 12),
+              if (!quick)
               DropdownButtonFormField<String>(
                 value: t,
                 isExpanded: true,
@@ -1871,7 +1905,7 @@ Future<void> settleDialog(BuildContext context, Group g,
                 ],
                 onChanged: (v) => setS(() => t = v ?? t),
               ),
-              const SizedBox(height: 12),
+              if (!quick) const SizedBox(height: 12),
               TextField(
                 controller: c,
                 keyboardType:
@@ -1905,8 +1939,9 @@ Future<void> settleDialog(BuildContext context, Group g,
               g.payments.add(Payment(newId(), f, t, a, DateTime.now()));
               store.changed();
               Navigator.pop(ctx);
+              snack(context, 'Marked as settled');
             },
-            child: const Text('Save'),
+            child: Text(quick ? 'Settle' : 'Save'),
           ),
         ],
       ),
@@ -1935,6 +1970,38 @@ class _AddExpensePageState extends State<AddExpensePage> {
   final Map<String, TextEditingController> valC = {};
   SplitType type = SplitType.equal;
   final Set<String> sel = {};
+  int loan = 0; // 0 normal, 1 I lent cash, 2 I borrowed cash
+  String? other;
+
+  String get _meId => g.me?.id ?? g.members.first.id;
+
+  void _applyLoan() {
+    if (loan == 0) return;
+    final me = _meId;
+    other ??= g.members
+        .firstWhere((m) => m.id != me, orElse: () => g.members.first)
+        .id;
+    final o = other!;
+    multi = false;
+    type = SplitType.equal;
+    sel.clear();
+    if (loan == 1) {
+      payer = me;
+      sel.add(o);
+    } else {
+      payer = o;
+      sel.add(me);
+    }
+  }
+
+  void _resetNormal() {
+    loan = 0;
+    payer = _meId;
+    multi = false;
+    type = SplitType.equal;
+    sel.clear();
+    sel.addAll(g.members.map((m) => m.id));
+  }
 
   TextEditingController pc(String id) =>
       paidC.putIfAbsent(id, () => TextEditingController());
@@ -1966,6 +2033,20 @@ class _AddExpensePageState extends State<AddExpensePage> {
       if (type != SplitType.equal) {
         for (final x in e.input.entries) {
           vc(x.key).text = fmtNum(x.value);
+        }
+      }
+      if (e.paid.length == 1 && e.input.length == 1) {
+        final pId = e.paid.keys.first;
+        final oId = e.input.keys.first;
+        final me = _meId;
+        if (pId != oId && type == SplitType.equal) {
+          if (pId == me && g.member(oId) != null) {
+            loan = 1;
+            other = oId;
+          } else if (oId == me && g.member(pId) != null) {
+            loan = 2;
+            other = pId;
+          }
         }
       }
     }
@@ -2179,6 +2260,11 @@ class _AddExpensePageState extends State<AddExpensePage> {
     final owed = computeOwed(amt, type, input);
     final issue = _splitIssue(input);
     final paidSum = _sum(_paid().values);
+    final warn = loan == 0 &&
+        !multi &&
+        payer != null &&
+        input.length == 1 &&
+        input.containsKey(payer);
     final hint = type == SplitType.equal
         ? 'Split equally. A member who covers more people gets more shares.'
         : (type == SplitType.exact
@@ -2239,6 +2325,67 @@ class _AddExpensePageState extends State<AddExpensePage> {
             ],
           ),
           const SizedBox(height: 4),
+          Wrap(
+            spacing: 8,
+            children: [
+              ChoiceChip(
+                label: const Text('Normal'),
+                selected: loan == 0,
+                onSelected: (_) => setState(_resetNormal),
+              ),
+              ChoiceChip(
+                label: const Text('I lent cash'),
+                selected: loan == 1,
+                onSelected: (_) => setState(() {
+                  loan = 1;
+                  _applyLoan();
+                }),
+              ),
+              ChoiceChip(
+                label: const Text('I borrowed cash'),
+                selected: loan == 2,
+                onSelected: (_) => setState(() {
+                  loan = 2;
+                  _applyLoan();
+                }),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          if (loan != 0) ...[
+            DropdownButtonFormField<String>(
+              value: other,
+              isExpanded: true,
+              decoration: InputDecoration(
+                  labelText: loan == 1 ? 'Lent to' : 'Borrowed from',
+                  border: const OutlineInputBorder()),
+              items: [
+                for (final m in g.members)
+                  if (!m.isMe)
+                    DropdownMenuItem(value: m.id, child: Text(m.name)),
+              ],
+              onChanged: (v) => setState(() {
+                other = v;
+                _applyLoan();
+              }),
+            ),
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                  color: (loan == 1 ? kGreen : kRed).withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(12)),
+              child: Text(
+                loan == 1
+                    ? '${g.member(other ?? '')?.name ?? 'They'} owes you ${money(amt)}'
+                    : 'You owe ${g.member(other ?? '')?.name ?? 'them'} ${money(amt)}',
+                style: TextStyle(
+                    fontWeight: FontWeight.w600,
+                    color: loan == 1 ? kGreen : kRed),
+              ),
+            ),
+          ],
+          if (loan == 0) ...[
           DropdownButtonFormField<String>(
             value: multi ? '__multi' : payer,
             isExpanded: true,
@@ -2328,6 +2475,18 @@ class _AddExpensePageState extends State<AddExpensePage> {
               child: TextButton(
                 onPressed: () => setState(_prefill),
                 child: const Text('Reset to equal'),
+              ),
+            ),
+          ],
+          if (warn)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text(
+                'Only the payer is in this split, so nobody owes anything. Tick the other person too, or choose I borrowed cash.',
+                style: TextStyle(
+                    fontSize: 12,
+                    color: Colors.orange.shade800,
+                    fontWeight: FontWeight.w600),
               ),
             ),
           const SizedBox(height: 8),
