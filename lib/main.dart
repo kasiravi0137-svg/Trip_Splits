@@ -888,7 +888,7 @@ class _LockPageState extends State<LockPage> {
                         'The only way is to reset the app. This deletes all data on this phone. Restore from an encrypted backup afterwards.',
                         'Reset app');
                     if (ok) {
-                      await store.resetAll();
+                      store.resetAll();
                       await auth.wipe();
                     }
                   },
