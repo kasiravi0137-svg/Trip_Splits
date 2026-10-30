@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_contacts/flutter_contacts.dart';
@@ -361,6 +363,8 @@ class Group {
 
 class Store extends ChangeNotifier {
   String myName = '';
+  String upiId = '';
+  String payPage = '';
   bool setupDone = false;
   List<Group> groups = [];
   bool loaded = false;
@@ -399,6 +403,8 @@ class Store extends ChangeNotifier {
   Map<String, dynamic> toMap() => {
         'version': 2,
         'myName': myName,
+        'upiId': upiId,
+        'payPage': payPage,
         'setupDone': setupDone,
         'groups': groups.map((g) => g.toJson()).toList(),
       };
@@ -413,6 +419,8 @@ class Store extends ChangeNotifier {
         .toList();
     final name = (j['myName'] ?? '').toString();
     myName = name;
+    upiId = (j['upiId'] ?? '').toString();
+    payPage = (j['payPage'] ?? '').toString();
     setupDone = j['setupDone'] ?? name.isNotEmpty;
     groups = gs;
   }
@@ -509,6 +517,16 @@ class Store extends ChangeNotifier {
     changed();
   }
 
+  void setUpi(String v) {
+    upiId = v.trim();
+    changed();
+  }
+
+  void setPayPage(String v) {
+    payPage = v.trim();
+    changed();
+  }
+
   void setMyName(String name) {
     myName = name;
     for (final g in groups) {
@@ -566,6 +584,371 @@ class TripSplitApp extends StatelessWidget {
   }
 }
 
+// ------------------------------------------------------------ phone + PIN lock
+
+List<int> _stretch(String text, List<int> salt) {
+  List<int> k = utf8.encode(text) + salt;
+  for (int i = 0; i < 20000; i++) {
+    k = sha256.convert(k + salt).bytes;
+  }
+  return k;
+}
+
+List<int> _randomBytes(int n) {
+  final r = Random.secure();
+  return List<int>.generate(n, (_) => r.nextInt(256));
+}
+
+String encryptBackup(String plain, String phone, String pin) {
+  final salt = _randomBytes(16);
+  final key = _stretch('$phone|$pin', salt);
+  final data = utf8.encode(plain);
+  final hm = Hmac(sha256, key);
+  final out = List<int>.filled(data.length, 0);
+  for (int i = 0; i < data.length; i += 32) {
+    final block = hm.convert(salt + [i >> 24 & 255, i >> 16 & 255, i >> 8 & 255, i & 255]).bytes;
+    for (int j = 0; j < 32 && i + j < data.length; j++) {
+      out[i + j] = data[i + j] ^ block[j];
+    }
+  }
+  final mac = Hmac(sha256, sha256.convert(key + [1]).bytes)
+      .convert(salt + out)
+      .bytes;
+  return 'TSB1:${base64.encode(salt + mac + out)}';
+}
+
+String? decryptBackup(String text, String phone, String pin) {
+  try {
+    if (!text.startsWith('TSB1:')) return null;
+    final raw = base64.decode(text.substring(5).replaceAll(RegExp(r'\s'), ''));
+    if (raw.length < 48) return null;
+    final salt = raw.sublist(0, 16);
+    final mac = raw.sublist(16, 48);
+    final cipher = raw.sublist(48);
+    final key = _stretch('$phone|$pin', salt);
+    final check = Hmac(sha256, sha256.convert(key + [1]).bytes)
+        .convert(salt + cipher)
+        .bytes;
+    int diff = 0;
+    for (int i = 0; i < 32; i++) {
+      diff |= mac[i] ^ check[i];
+    }
+    if (diff != 0) return null;
+    final hm = Hmac(sha256, key);
+    final out = List<int>.filled(cipher.length, 0);
+    for (int i = 0; i < cipher.length; i += 32) {
+      final block = hm.convert(salt + [i >> 24 & 255, i >> 16 & 255, i >> 8 & 255, i & 255]).bytes;
+      for (int j = 0; j < 32 && i + j < cipher.length; j++) {
+        out[i + j] = cipher[i + j] ^ block[j];
+      }
+    }
+    return utf8.decode(out);
+  } catch (_) {
+    return null;
+  }
+}
+
+class AuthStore extends ChangeNotifier {
+  bool loaded = false;
+  bool unlocked = false;
+  String phone = '';
+  String _salt = '';
+  String _hash = '';
+
+  bool get has => phone.isNotEmpty && _hash.isNotEmpty;
+
+  Future<File> _file() async {
+    final dir = await getApplicationDocumentsDirectory();
+    return File('${dir.path}/trip_auth.json');
+  }
+
+  Future<void> load() async {
+    try {
+      final f = await _file().timeout(const Duration(seconds: 5));
+      if (await f.exists()) {
+        final m = jsonDecode(await f.readAsString()) as Map<String, dynamic>;
+        phone = (m['phone'] ?? '') as String;
+        _salt = (m['salt'] ?? '') as String;
+        _hash = (m['hash'] ?? '') as String;
+      }
+    } catch (_) {}
+    loaded = true;
+    notifyListeners();
+  }
+
+  String _make(String pin, String salt) =>
+      base64.encode(_stretch('$phone|$pin', base64.decode(salt)));
+
+  Future<void> setup(String ph, String pin) async {
+    phone = ph;
+    _salt = base64.encode(_randomBytes(16));
+    _hash = _make(pin, _salt);
+    unlocked = true;
+    try {
+      final f = await _file();
+      await f.writeAsString(
+          jsonEncode({'phone': phone, 'salt': _salt, 'hash': _hash}));
+    } catch (_) {}
+    notifyListeners();
+  }
+
+  bool checkPin(String pin) => has && _make(pin, _salt) == _hash;
+
+  bool unlock(String pin) {
+    if (checkPin(pin)) {
+      unlocked = true;
+      notifyListeners();
+      return true;
+    }
+    return false;
+  }
+
+  Future<void> wipe() async {
+    phone = '';
+    _salt = '';
+    _hash = '';
+    unlocked = false;
+    try {
+      final f = await _file();
+      if (await f.exists()) await f.delete();
+    } catch (_) {}
+    notifyListeners();
+  }
+}
+
+final auth = AuthStore();
+
+class SecuritySetupPage extends StatefulWidget {
+  const SecuritySetupPage({super.key});
+  @override
+  State<SecuritySetupPage> createState() => _SecuritySetupPageState();
+}
+
+class _SecuritySetupPageState extends State<SecuritySetupPage> {
+  final ph = TextEditingController();
+  final p1 = TextEditingController();
+  final p2 = TextEditingController();
+  String? err;
+  bool busy = false;
+
+  Future<void> save() async {
+    final phone = ph.text.trim();
+    if (phone.length != 10) {
+      setState(() => err = 'Enter your 10 digit mobile number');
+      return;
+    }
+    if (p1.text.length != 4) {
+      setState(() => err = 'PIN must be 4 digits');
+      return;
+    }
+    if (p1.text != p2.text) {
+      setState(() => err = 'PINs do not match');
+      return;
+    }
+    setState(() {
+      err = null;
+      busy = true;
+    });
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    await auth.setup(phone, p1.text);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final digits = [FilteringTextInputFormatter.digitsOnly];
+    return Scaffold(
+      body: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.all(24),
+          children: [
+            const SizedBox(height: 24),
+            const Icon(Icons.lock_outline, size: 48, color: kBlue),
+            const SizedBox(height: 12),
+            const Text('Secure your app',
+                style: TextStyle(fontSize: 26, fontWeight: FontWeight.w600)),
+            const SizedBox(height: 6),
+            const Text(
+                'Your mobile number and PIN lock this app and encrypt your backups. Nobody can restore your backup without both.',
+                style: TextStyle(color: Colors.black54)),
+            const SizedBox(height: 20),
+            TextField(
+              controller: ph,
+              keyboardType: TextInputType.number,
+              maxLength: 10,
+              inputFormatters: digits,
+              decoration: const InputDecoration(
+                  labelText: 'Mobile number',
+                  prefixText: '+91 ',
+                  border: OutlineInputBorder()),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: p1,
+              keyboardType: TextInputType.number,
+              obscureText: true,
+              maxLength: 4,
+              inputFormatters: digits,
+              decoration: const InputDecoration(
+                  labelText: '4 digit PIN', border: OutlineInputBorder()),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: p2,
+              keyboardType: TextInputType.number,
+              obscureText: true,
+              maxLength: 4,
+              inputFormatters: digits,
+              decoration: const InputDecoration(
+                  labelText: 'Confirm PIN', border: OutlineInputBorder()),
+            ),
+            if (err != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Text(err!, style: const TextStyle(color: kRed)),
+              ),
+            const SizedBox(height: 8),
+            FilledButton(
+              onPressed: busy ? null : save,
+              child: Text(busy ? 'Saving…' : 'Continue'),
+            ),
+            const SizedBox(height: 12),
+            const Text(
+                'If you forget your PIN you cannot open encrypted backups. Note it down.',
+                style: TextStyle(fontSize: 12, color: Colors.black45)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class LockPage extends StatefulWidget {
+  const LockPage({super.key});
+  @override
+  State<LockPage> createState() => _LockPageState();
+}
+
+class _LockPageState extends State<LockPage> {
+  final c = TextEditingController();
+  String? err;
+
+  void tryUnlock() {
+    if (!auth.unlock(c.text)) {
+      setState(() => err = 'Wrong PIN');
+      c.clear();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(28),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.lock_outline, size: 48, color: kBlue),
+                const SizedBox(height: 12),
+                const Text('TripSplit',
+                    style:
+                        TextStyle(fontSize: 26, fontWeight: FontWeight.w600)),
+                const SizedBox(height: 4),
+                const Text('Enter your PIN',
+                    style: TextStyle(color: Colors.black54)),
+                const SizedBox(height: 20),
+                SizedBox(
+                  width: 200,
+                  child: TextField(
+                    controller: c,
+                    autofocus: true,
+                    textAlign: TextAlign.center,
+                    keyboardType: TextInputType.number,
+                    obscureText: true,
+                    maxLength: 4,
+                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                    style: const TextStyle(fontSize: 24, letterSpacing: 8),
+                    decoration:
+                        const InputDecoration(border: OutlineInputBorder()),
+                    onChanged: (v) {
+                      if (v.length == 4) tryUnlock();
+                    },
+                    onSubmitted: (_) => tryUnlock(),
+                  ),
+                ),
+                if (err != null)
+                  Text(err!, style: const TextStyle(color: kRed)),
+                const SizedBox(height: 8),
+                TextButton(
+                  onPressed: () async {
+                    final ok = await confirmDialog(
+                        context,
+                        'Forgot PIN?',
+                        'The only way is to reset the app. This deletes all data on this phone. Restore from an encrypted backup afterwards.',
+                        'Reset app');
+                    if (ok) {
+                      await store.resetAll();
+                      await auth.wipe();
+                    }
+                  },
+                  child: const Text('Forgot PIN?'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+Future<String?> pinPrompt(BuildContext context, String title) async {
+  final c = TextEditingController();
+  String? err;
+  String? result;
+  await showDialog(
+    context: context,
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setS) => AlertDialog(
+        title: Text(title),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: c,
+              autofocus: true,
+              keyboardType: TextInputType.number,
+              obscureText: true,
+              maxLength: 4,
+              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+              decoration: const InputDecoration(
+                  labelText: 'PIN', border: OutlineInputBorder()),
+            ),
+            if (err != null) Text(err!, style: const TextStyle(color: kRed)),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          FilledButton(
+            onPressed: () {
+              if (auth.checkPin(c.text)) {
+                result = c.text;
+                Navigator.pop(ctx);
+              } else {
+                setS(() => err = 'Wrong PIN');
+              }
+            },
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    ),
+  );
+  return result;
+}
+
 class Root extends StatefulWidget {
   const Root({super.key});
   @override
@@ -579,17 +962,20 @@ class _RootState extends State<Root> {
   void initState() {
     super.initState();
     store.load();
+    auth.load();
   }
 
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
-      listenable: store,
+      listenable: Listenable.merge([store, auth]),
       builder: (context, _) {
-        if (!store.loaded) {
+        if (!store.loaded || !auth.loaded) {
           return const Scaffold(
               body: Center(child: CircularProgressIndicator()));
         }
+        if (!auth.has) return const SecuritySetupPage();
+        if (!auth.unlocked) return const LockPage();
         if (!store.setupDone) return const WelcomePage();
         final pages = <Widget>[
           const GroupsTab(),
@@ -777,7 +1163,8 @@ Future<bool> confirmDialog(
 }
 
 Future<void> textDialog(BuildContext context, String title, String initial,
-    void Function(String) onSave) async {
+    void Function(String) onSave,
+    {bool caps = true}) async {
   final c = TextEditingController(text: initial);
   await showDialog(
     context: context,
@@ -786,7 +1173,7 @@ Future<void> textDialog(BuildContext context, String title, String initial,
       content: TextField(
         controller: c,
         autofocus: true,
-        textCapitalization: TextCapitalization.words,
+        textCapitalization: caps ? TextCapitalization.words : TextCapitalization.none,
       ),
       actions: [
         TextButton(
@@ -961,8 +1348,16 @@ Future<void> sendReminder(BuildContext context, Group g, Transfer t) async {
     return;
   }
   final creditor = g.nameOf(t.to) == 'You' ? store.myName : g.nameOf(t.to);
-  final msg =
+  var msg =
       'Hi ${debtor.name}, reminder from TripSplit: in "${g.name}" you owe ${money(t.amount)} to $creditor. Please pay when you can.';
+  if (store.upiId.isNotEmpty && g.nameOf(t.to) == 'You') {
+    final q =
+        'pa=${Uri.encodeComponent(store.upiId)}&pn=${Uri.encodeComponent(store.myName)}&am=${t.amount.toStringAsFixed(2)}&cu=INR&tn=${Uri.encodeComponent('TripSplit ${g.name}')}';
+    final base = store.payPage.isNotEmpty
+        ? '${store.payPage}${store.payPage.contains('?') ? '&' : '?'}'
+        : 'upi://pay?';
+    msg += '\nUPI ID: ${store.upiId}\nPay ${money(t.amount)}: $base$q';
+  }
   final choice = await showModalBottomSheet<String>(
     context: context,
     builder: (ctx) => SafeArea(
@@ -2757,9 +3152,29 @@ class AccountTab extends StatelessWidget {
                   ListTile(
                     leading: Avatar(store.myName, kBlue, size: 40),
                     title: Text(store.myName),
-                    subtitle: const Text('Tap to change your name'),
+                    subtitle: Text('+91 ${auth.phone} · tap to change name'),
                     onTap: () => textDialog(context, 'Your name', store.myName,
                         (v) => store.setMyName(v)),
+                  ),
+                  const Divider(height: 1, indent: 56),
+                  ListTile(
+                    leading: const Icon(Icons.account_balance_wallet_outlined),
+                    title: const Text('My UPI ID'),
+                    subtitle: Text(store.upiId.isEmpty
+                        ? 'Added to reminders so people can pay you'
+                        : store.upiId),
+                    onTap: () => textDialog(context, 'Your UPI ID',
+                        store.upiId, (v) => store.setUpi(v), caps: false),
+                  ),
+                  const Divider(height: 1, indent: 56),
+                  ListTile(
+                    leading: const Icon(Icons.link),
+                    title: const Text('Pay page link (optional)'),
+                    subtitle: Text(store.payPage.isEmpty
+                        ? 'Makes the pay link clickable in WhatsApp'
+                        : store.payPage),
+                    onTap: () => textDialog(context, 'Pay page link',
+                        store.payPage, (v) => store.setPayPage(v), caps: false),
                   ),
                 ],
               ),
@@ -2773,20 +3188,24 @@ class AccountTab extends StatelessWidget {
                 children: [
                   ListTile(
                     leading: const Icon(Icons.copy_outlined),
-                    title: const Text('Copy backup (JSON)'),
-                    subtitle:
-                        const Text('Paste it in a note or chat to keep it safe'),
+                    title: const Text('Copy encrypted backup'),
+                    subtitle: const Text(
+                        'Locked with your mobile number and PIN'),
                     onTap: () async {
-                      await Clipboard.setData(
-                          ClipboardData(text: store.exportJson()));
-                      if (context.mounted) snack(context, 'Backup copied');
+                      final pin =
+                          await pinPrompt(context, 'Enter PIN to encrypt');
+                      if (pin == null) return;
+                      final text =
+                          encryptBackup(store.exportJson(), auth.phone, pin);
+                      await Clipboard.setData(ClipboardData(text: text));
+                      if (context.mounted) snack(context, 'Encrypted backup copied');
                     },
                   ),
                   const Divider(height: 1, indent: 56),
                   ListTile(
                     leading: const Icon(Icons.restore),
-                    title: const Text('Restore from JSON'),
-                    subtitle: const Text('Paste a backup to load it'),
+                    title: const Text('Restore backup'),
+                    subtitle: const Text('Paste a backup, enter number and PIN'),
                     onTap: () => restoreDialog(context),
                   ),
                   const Divider(height: 1, indent: 56),
@@ -2827,7 +3246,7 @@ class AccountTab extends StatelessWidget {
             ),
             const SizedBox(height: 14),
             const Text(
-                'Your data is saved on this phone in trip_data.json and is never uploaded.',
+                'Your data is saved on this phone and is never uploaded. Backups are encrypted with your number and PIN.',
                 style: TextStyle(fontSize: 12, color: Colors.black45)),
           ],
         );
@@ -2838,6 +3257,8 @@ class AccountTab extends StatelessWidget {
 
 Future<void> restoreDialog(BuildContext context) async {
   final c = TextEditingController();
+  final pc = TextEditingController(text: auth.phone);
+  final kc = TextEditingController();
   String? err;
   await showDialog(
     context: context,
@@ -2852,7 +3273,27 @@ Future<void> restoreDialog(BuildContext context) async {
                 controller: c,
                 maxLines: 8,
                 decoration: const InputDecoration(
-                    hintText: 'Paste backup JSON here',
+                    hintText: 'Paste backup here',
+                    border: OutlineInputBorder()),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: pc,
+                keyboardType: TextInputType.number,
+                maxLength: 10,
+                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                decoration: const InputDecoration(
+                    labelText: 'Mobile number of the backup',
+                    border: OutlineInputBorder()),
+              ),
+              TextField(
+                controller: kc,
+                keyboardType: TextInputType.number,
+                obscureText: true,
+                maxLength: 4,
+                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                decoration: const InputDecoration(
+                    labelText: 'PIN of the backup',
                     border: OutlineInputBorder()),
               ),
               if (err != null)
@@ -2869,7 +3310,18 @@ Future<void> restoreDialog(BuildContext context) async {
               child: const Text('Cancel')),
           FilledButton(
             onPressed: () {
-              if (store.importJson(c.text.trim())) {
+              final t = c.text.trim();
+              String? json;
+              if (t.startsWith('{')) {
+                json = t;
+              } else {
+                json = decryptBackup(t, pc.text.trim(), kc.text);
+                if (json == null) {
+                  setS(() => err = 'Wrong number or PIN, or backup is damaged.');
+                  return;
+                }
+              }
+              if (store.importJson(json)) {
                 Navigator.pop(ctx);
               } else {
                 setS(() => err = 'That is not a valid backup.');
