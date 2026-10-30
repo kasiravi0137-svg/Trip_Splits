@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pay with UPI</title>
+<style>
+body{font-family:system-ui,sans-serif;background:#f4f6fb;margin:0;display:flex;align-items:center;justify-content:center;min-height:100vh}
+.c{background:#fff;border-radius:16px;padding:28px 24px;max-width:340px;width:90%;text-align:center;box-shadow:0 2px 12px rgba(0,0,0,.08)}
+h1{font-size:20px;margin:0 0 6px}
+.amt{font-size:34px;font-weight:600;color:#2f6fed;margin:10px 0}
+.m{color:#666;font-size:14px;margin:4px 0}
+a.b{display:block;background:#2f6fed;color:#fff;text-decoration:none;border-radius:12px;padding:14px;margin-top:18px;font-size:16px}
+</style>
+</head>
+<body>
+<div class="c">
+<h1>Pay with UPI</h1>
+<div class="m" id="to"></div>
+<div class="amt" id="am"></div>
+<div class="m" id="note"></div>
+<a class="b" id="go" href="#">Open UPI app</a>
+<div class="m" style="margin-top:14px">UPI ID: <b id="pa"></b></div>
+</div>
+<script>
+var q = new URLSearchParams(location.search);
+var pa = q.get('pa') || '';
+var pn = q.get('pn') || '';
+var am = q.get('am') || '';
+var tn = q.get('tn') || '';
+document.getElementById('to').textContent = pn ? 'To ' + pn : '';
+document.getElementById('am').textContent = am ? '₹' + am : '';
+document.getElementById('note').textContent = tn;
+document.getElementById('pa').textContent = pa;
+var link = 'upi://pay?pa=' + encodeURIComponent(pa) + '&pn=' + encodeURIComponent(pn) + '&am=' + encodeURIComponent(am) + '&cu=INR&tn=' + encodeURIComponent(tn);
+document.getElementById('go').href = link;
+if (pa) { setTimeout(function () { location.href = link; }, 400); }
+</script>
+</body>
+</html>
